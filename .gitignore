@@ -244,3 +244,7 @@ tests/
 .DS_Store
 
 .vscode/
+
+# Course material
+assignment-info
+content/
