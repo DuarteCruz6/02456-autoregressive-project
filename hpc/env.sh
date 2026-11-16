@@ -20,14 +20,17 @@ done
 export PATH="$HOME/.local/bin:$PATH"  # where the uv installer puts uv
 
 # Keep the big caches out of the small home quota: the ESMFold weights (~8 GB) and uv's
-# package cache (several GB of torch/CUDA wheels). They go to /work3/$USER if it exists,
-# otherwise to .cache/ inside this repository. Set HF_HOME / UV_CACHE_DIR to override.
+# package cache (several GB of torch/CUDA wheels). They go to /work3/$USER if it exists, then to
+# $BLACKHOLE (the course scratch space, where fold.py also looks), otherwise to .cache/ inside this
+# repository. Set HF_HOME / UV_CACHE_DIR to override.
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"  # -P: real path, not via symlinks
 # The scripts that source this file run under `set -u`, where a bare $USER would abort them in any
 # environment that does not export it - a batch job started from a bare shell, for one.
 WHO="${USER:-$(id -un)}"
 if [ -d "/work3/$WHO" ]; then
     CACHE_ROOT="/work3/$WHO"
+elif [ -n "${BLACKHOLE:-}" ] && [ -d "$BLACKHOLE" ]; then
+    CACHE_ROOT="$BLACKHOLE"
 else
     CACHE_ROOT="$REPO_DIR/.cache"
 fi
