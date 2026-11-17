@@ -21,7 +21,7 @@
 ##BSUB -N
 
 set -eu
-cd "$(dirname "$0")/.."
+cd "${LS_SUBCWD:-$(dirname "$0")/..}"   # bsub < runs a copy from ~/.lsbatch; LS_SUBCWD is where it was submitted
 
 SETS="control_real control_shuffled mock_data"
 
