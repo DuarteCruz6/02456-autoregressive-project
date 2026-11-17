@@ -48,12 +48,14 @@ class MLP(nn.Module):
     Returns raw logits, no softmax: F.cross_entropy applies log-softmax itself.
     """
 
-    def __init__(self, context=CONTEXT_WIN, hidden_dim=256, num_layers=2,
+    def __init__(self, context=CONTEXT_WIN, hidden_dim=256, num_layers=2, dropout=0.0,
                  vocab_size=len(total_tokens)):
         super().__init__()
+        self.context = context      # the sampler reads it, so it always matches the training windows
         layers, in_dim = [], context * NUM_AA
         for _ in range(num_layers):
-            layers += [nn.Linear(in_dim, hidden_dim), nn.GELU()]
+            # Dropout is always a layer, even at p=0, so checkpoints share keys whatever p was.
+            layers += [nn.Linear(in_dim, hidden_dim), nn.GELU(), nn.Dropout(dropout)]
             in_dim = hidden_dim
         layers.append(nn.Linear(in_dim, vocab_size))   # one score per token id, 0..22
         self.net = nn.Sequential(*layers)
@@ -110,11 +112,72 @@ def train(model, X_train, Y_train, X_val, Y_val, *, epochs=10, batch_size=512, l
     return history
 
 
+PAD_ID, BOS_ID, EOS_ID = (total_tokens.index(t) for t in ("<PAD>", "<BOS>", "<EOS>"))
+MAX_RESIDUES = 127          # the longest protein in the data
+
+
+@torch.no_grad()
+def sample(model, n, *, temperature=1.0, max_residues=MAX_RESIDUES):
+    """Generate `n` proteins at once; returns them as residue strings.
+
+    Every sequence starts from the context <PAD> ... <PAD> <BOS> (all zeros, as in training) and
+    stops at its first <EOS>. One that reaches `max_residues` without an <EOS> is cut there.
+    """
+    model.eval()
+    device = next(model.parameters()).device
+    ctx = torch.full((n, model.context), PAD_ID, dtype=torch.long, device=device)
+    ctx[:, -1] = BOS_ID
+    out = torch.full((n, max_residues), PAD_ID, dtype=torch.long, device=device)
+    done = torch.zeros(n, dtype=torch.bool, device=device)
+
+    for t in range(max_residues + 1):
+        logits = model(one_hot_context(ctx)) / temperature
+        logits[:, [PAD_ID, BOS_ID]] = float("-inf")   # never targets in training, never sampled
+        if t == 0:
+            logits[:, EOS_ID] = float("-inf")         # no empty proteins
+        if t == max_residues:
+            break
+        nxt = torch.multinomial(logits.softmax(dim=-1), 1).squeeze(1)
+        nxt[done] = PAD_ID                            # finished rows just pad
+        done |= nxt == EOS_ID
+        out[:, t] = torch.where(nxt == EOS_ID, PAD_ID, nxt)
+        ctx = torch.cat([ctx[:, 1:], nxt[:, None]], dim=1)
+        if done.all():
+            break
+
+    return ["".join(AA[i - START_AA_ID] for i in row.tolist() if i >= START_AA_ID) for row in out]
+
+
 if __name__ == "__main__":
+    import argparse
+    from protgen.metrics.sequences import write_sequences
+
+    parser = argparse.ArgumentParser(description="Train the MLP, or sample from a trained one.")
+    parser.add_argument("--sample", type=int, metavar="N", help="sample N proteins instead of training")
+    parser.add_argument("--context", type=int, default=CONTEXT_WIN, help="residues of context")
+    parser.add_argument("--dropout", type=float, default=0.0, help="dropout after each hidden layer")
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--checkpoint", help="default: runs/<run name>.pt")
+    parser.add_argument("--out", help="default: results/sequences/<run name>.csv")
+    args = parser.parse_args()
+    # e.g. mlp_ctx10, mlp_ctx10_do0.2 - the settings that change the model name the run
+    name = (f"mlp_ctx{args.context}" + (f"_do{args.dropout:g}" if args.dropout else "")
+            + (f"_ep{args.epochs}" if args.epochs != 10 else ""))
+    args.checkpoint = args.checkpoint or f"runs/{name}.pt"
+    args.out = args.out or f"results/sequences/{name}.csv"
     torch.manual_seed(0)
-    X_train, Y_train = make_windows(train_data)
-    X_val, Y_val = make_windows(val_dats)
-    model = MLP()
-    history = train(model, X_train, Y_train, X_val, Y_val)
-    os.makedirs("runs", exist_ok=True)
-    torch.save(model.state_dict(), "runs/mlp.pt")   # runs/ is gitignored
+
+    if args.sample:
+        model = MLP(context=args.context)
+        model.load_state_dict(torch.load(args.checkpoint, map_location="cpu"))
+        seqs = sample(model, args.sample, temperature=args.temperature)
+        write_sequences(args.out, [{"sequence": s} for s in seqs])
+        print(f"wrote {len(seqs)} sequences to {args.out}")
+    else:
+        X_train, Y_train = make_windows(train_data, context=args.context)
+        X_val, Y_val = make_windows(val_dats, context=args.context)
+        model = MLP(context=args.context, dropout=args.dropout)
+        history = train(model, X_train, Y_train, X_val, Y_val, epochs=args.epochs)
+        os.makedirs("runs", exist_ok=True)
+        torch.save(model.state_dict(), args.checkpoint)   # runs/ is gitignored
