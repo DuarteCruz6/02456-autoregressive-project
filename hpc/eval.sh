@@ -3,7 +3,7 @@
 #BSUB -J eval
 #BSUB -n 4
 #BSUB -gpu "num=1:mode=exclusive_process"
-#BSUB -W 0:30
+#BSUB -W 2:00
 #BSUB -R "rusage[mem=8GB]"
 #BSUB -o hpc/logs/eval.out
 #BSUB -e hpc/logs/eval.err
@@ -20,6 +20,23 @@
 ##BSUB -B
 ##BSUB -N
 
+set -eu
+cd "${LS_SUBCWD:-$(dirname "$0")/..}"   # bsub < runs a copy from ~/.lsbatch; LS_SUBCWD is where it was submitted
 source hpc/env.sh
 
-uv run --group eval python eval/eval.py --samples results/sequences/mock_data.csv --fold   
+SETS="control_real control_shuffled mlp rnn gru lstm transformer"
+
+# the controls, so this job needs nothing prepared by hand. Same --num as generate.py uses.
+uv run python eval/make_controls.py --num 256
+
+for NAME in $SETS; do
+    SAMPLES="results/sequences/$NAME.csv"
+    if [ ! -f "$SAMPLES" ]; then
+        echo "== $NAME: no $SAMPLES, skipping"
+        continue
+    fi
+    echo "== $NAME"
+    bash hpc/run_eval.sh "$SAMPLES"
+done
+
+echo "Done. Each set is in results/eval/<name>/"
